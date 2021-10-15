@@ -1,0 +1,604 @@
+#include <stdio.h>
+#include <varargs.h>
+#ifdef MSDOS
+#include <dos.h>
+#endif
+static char curses_vers[] = "@(#) CURSES version 0.1 PRERELEASE 10/22/87";
+static char curses_cpyw[] = "@(#) Copyright 1987 Edwin R. Carp";
+
+/* #define EXPDATE ~568022341L  expires 12/31/87 at 23:01 */
+#define EXPDATE ~999999999L
+
+/*
+ * curses for MSDOS - added UNIX functionality 08/22/92
+ * 
+ * This code was written by Edwin R. Carp (except for scanw/wscanw)
+ * 
+ * Written 10/06/87.
+ * 
+ * This code compiles under Microsoft C 3.0 and higher rev compilers, as well as
+ * the Microsoft Quick C compiler (version 1.0 and higher).  To compile under
+ * Borland's Turbo C compiler, you need to change the varargs stuff in
+ * printw.
+ * 
+ * The UNIX version of this code is designed to work with the GNU termcap
+ * package (available from prep.ai.mit.edu:/pub/gnu).
+ * 
+ * Functions supported:
+ * 
+ * Output Functions:
+ * 
+ * waddch, waddstr, box*, wclear, clearok, wclearbot, wclrtoeol, wdelch, werase,
+ * winsch, wmove, nl, nonl, wprintw, wrefresh, wstandout, wstandend
+ * wdeleteln, winsertln
+ * 
+ * Input functions:
+ * 
+ * echo, noecho, wgetch, wgetstr, wscanw
+ * 
+ * Miscellaneous Functions:
+ * 
+ * delwin, endwin, getyx, winch, initscr, leaveok, longname, newwin, scrollok,
+ * touchwin, mvcur
+ * 
+ * NEW ROUTINES:
+ * 
+ * switchsc(), color(), wcolor()
+ * 
+ * NOTES:
+ * 
+ * the box() function has been expanded.  See curses.h for details.
+ * 
+ * scrollok() will set the _scroll flag, but it will be ignored. Scrolling is
+ * not allowed.
+ * 
+ * longname() returns "vt100".
+ * 
+ * getch() calls the Microsoft getch() routine.
+ * 
+ * clear() and erase() never send the clear-screen sequence, since ansi.sys is
+ * not supported.
+ * 
+ * Unsupported functions:
+ * 
+ * subwin()
+ * 
+ * THINGS TO DO:
+ * 
+ * 1.  Add real SysV stuff, like attrset(), etc.
+ * 
+ * 2.  Someday, port this mess to *NIX.  Have to add "character changed" logic,
+ * rather than "line changed" logic, etc.  Do the termcap/terminfo stuff,
+ * too.  This code is (sort of) optimized for MSDOS right now.
+ * 
+ * This isn't really as hard as it might look.  The routines initscr(), getch(),
+ * refresh(), mvcur(), and endwin() are MS-DOS-optimized, and need to be
+ * changed for UNIX termcap/terminfo support.
+ * 
+ * 3.  Steal subwin from the BSD curses stuff.  :)
+ */
+
+/*
+ * psuedo functions for standard screen
+ */
+
+#define   addch(ch)             waddch(stdscr, ch)
+#define   addstr(str)           waddstr(stdscr, str)
+#define   clear()               wclear(stdscr)
+#define   clrtobot()            wclrtobot(stdscr)
+#define   clrtoeol()            wclrtoeol(stdscr)
+#define   color(f, b, rf, rb)   wcolor(stdscr, f, b, rf, rb)
+#define   deleteln()            wdeleteln(stdscr)
+#define   erase()               werase(stdscr)
+#define   getstr(str)           wgetstr(stdscr, str)
+#define   inch()                winch(stdscr)
+#define   insertln()            winsertln(stdscr)
+#define   move(y, x)            wmove(stdscr, y, x)
+#define   refresh()             wrefresh(stdscr)
+#define   standout()            wstandout(stdscr)
+#define   standend()            wstandend(stdscr)
+
+/*
+ * mv functions
+ */
+
+#define mvwaddch(win,y,x,ch) (wmove(win,y,x)==ERR?ERR:waddch(win,ch))
+#define mvwgetch(win,y,x) (wmove(win,y,x)==ERR?ERR:wgetch(win))
+#define mvwaddstr(win,y,x,s) (wmove(win,y,x)==ERR?ERR:waddstr(win,s))
+#define mvwgetstr(win,y,x,s) (wmove(win,y,x)==ERR?ERR:wgetstr(win,s))
+#define mvwinch(win,y,x) (wmove(win,y,x)==ERR?ERR:winch(win))
+#define mvaddch(y,x,ch) mvwaddch(stdscr,y,x,ch)
+#define mvgetch(y,x) mvwgetch(stdscr,y,x)
+#define mvaddstr(y,x,str) mvwaddstr(stdscr,y,x,str)
+#define mvgetstr(y,x,str) mvwgetstr(stdscr,y,x,str)
+#define mvinch(y,x) mvwinch(stdscr,y,x)
+
+/*
+ * miscellaneous defines
+ */
+#define echo() ECHOSW=1
+#define noecho() ECHOSW=0
+#define nl() NEWMAP=1
+#define nonl() NEWMAP=0
+#define isdigit(ch) (ch >= '0' && ch <= '9')
+#define iswhite(ch) (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+
+/*
+ * termcap routine defines
+ */
+
+char *tgetstr (), *getenv ();
+
+#undef putchar
+
+#ifdef __POSIX_TERMIOS
+#define raw()	 (_tty.c_lflag&=~(ICANON|ISIG),\
+	_pfast=_rawmode=TRUE, tcsetattr(_tty_ch, TCSANOW, &_tty))
+
+#define noraw()	 (_tty.c_lflag|=ISIG,_rawmode=FALSE,\
+	_pfast=(_tty.c_iflag&ICRNL),tcsetattr(_tty_ch, TCSANOW, &_tty))
+
+/* cbreak is like raw, but without turning off signals. */
+
+#define cbreak() (_tty.c_lflag&=~ICANON, \
+	_rawmode = TRUE, tcsetattr(_tty_ch, TCSANOW, &_tty))
+
+#define nocbreak() (_tty.c_lflag |= ICANON, _tty.c_lflag &= ~ISIG, \
+	_rawmode=FALSE, tcsetattr(_tty_ch, TCSANOW, &_tty))
+
+#define crmode() cbreak()	/* backwards compatability */
+#define nocrmode() nocbreak()	/* backwards compatability */
+
+/*
+#define echo()	 (_tty.c_lflag |= ECHO, _echoit = TRUE, \
+	tcsetattr(_tty_ch, TCSADRAIN, &_tty))
+#define noecho() (_tty.c_lflag &= ~ECHO, _echoit = FALSE, \
+	tcsetattr(_tty_ch, TCSADRAIN, &_tty))
+#define nl()	 (_tty.c_iflag |= ICRNL,_pfast = _rawmode, \
+	tcsetattr(_tty_ch, TCSANOW, &_tty))
+#define nonl()	 (_tty.c_iflag &= ~ICRNL, _pfast = TRUE, \
+	tcsetattr(_tty_ch, TCSANOW, &_tty))
+*/
+#define	savetty() ((void) tcgetattr(_tty_ch, &_tty), \
+	_res_iflg = _tty.c_iflag, _res_lflg = _tty.c_lflag)
+#define	resetty() (_tty.c_iflag = _res_iflg, _tty.c_lflag = _res_lflg,\
+	_echoit = ((_res_lflg & ECHO) == ECHO), \
+	_rawmode = ((_res_lflg & (ISIG|ICANON)) != 0), \
+	_pfast = ((_res_iflg & ICRNL) ? _rawmode : TRUE), \
+	(void) tcsetattr(_tty_ch, TCSADRAIN, &_tty))
+
+#define	erasechar()	(_tty.c_cc[VERASE])
+#define	killchar()	(_tty.c_cc[VKILL])
+#define baudrate()	(cfgetospeed(&_tty))
+#else
+#define raw()	 (_tty.sg_flags|=RAW, _pfast=_rawmode=TRUE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define noraw()	 (_tty.sg_flags&=~RAW,_rawmode=FALSE,\
+	_pfast=!(_tty.sg_flags&CRMOD),ioctl(_tty_ch, TIOCSETP, &_tty))
+#define cbreak() (_tty.sg_flags |= CBREAK, _rawmode = TRUE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define nocbreak() (_tty.sg_flags &= ~CBREAK,_rawmode=FALSE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define crmode() cbreak()	/* backwards compatability */
+#define nocrmode() nocbreak()	/* backwards compatability */
+/*
+#define echo()	 (_tty.sg_flags |= ECHO, _echoit = TRUE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define noecho() (_tty.sg_flags &= ~ECHO, _echoit = FALSE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define nl()	 (_tty.sg_flags |= CRMOD,_pfast = _rawmode, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+#define nonl()	 (_tty.sg_flags &= ~CRMOD, _pfast = TRUE, \
+	ioctl(_tty_ch, TIOCSETP, &_tty))
+*/
+#define	savetty() ((void) ioctl(_tty_ch, TIOCGETP, &_tty), \
+	_res_flg = _tty.sg_flags)
+#define	resetty() (_tty.sg_flags = _res_flg, \
+	_echoit = ((_res_flg & ECHO) == ECHO), \
+	_rawmode = ((_res_flg & (CBREAK|RAW)) != 0), \
+	_pfast = ((_res_flg & CRMOD) ? _rawmode : TRUE), \
+	(void) ioctl(_tty_ch, TIOCSETP, &_tty))
+
+#define	erasechar()	(_tty.sg_erase)
+#define	killchar()	(_tty.sg_kill)
+#define baudrate()	(_tty.sg_ospeed)
+#endif
+/*
+ * variable defs follow
+ * 
+ */
+
+#ifndef WINDOW
+
+#define   bool   char
+#define   reg   register
+
+#define   TRUE   (1)
+#define   FALSE   (0)
+#define   ERR   (0)
+#define   OK   (1)
+
+#define   _ENDLINE   001
+#define   _FULLWIN   002
+#define   _SCROLLWIN   004
+#define   _FLUSH      010
+#define   _SUBWIN     020
+#define   _STANDOUT   0200
+#define   _NOCHANGE   -1
+
+struct _win_st
+{
+  short _cury, _curx;
+  short _maxy, _maxx;
+  short _begy, _begx;
+  short FG, BG, REV_FG, REV_BG;	/* colors */
+  short _flags;
+  bool _clear;
+  bool _leave;
+  bool _scroll;
+  bool _touch;
+  bool _keypad;
+  bool _box;			/* TRUE if there's a box on the screen */
+  short _fr, _lr;		/* first row, last row changed */
+  char **_y;
+};
+
+#define   WINDOW   struct _win_st
+
+extern bool My_term, _echoit, _rawmode, _endwin;
+
+extern char *Def_term, *ttytype;
+
+extern int LINES, COLS;
+extern char PC, *BC, *UP, *_clstr, *_cmstr;
+extern int ospeed;
+
+extern WINDOW *stdscr;
+
+/*
+ * psuedo functions
+ */
+
+#define clearok(win,bf) (win->_clear = bf)
+#define leaveok(win,bf) (win->_leave = bf)
+#define scrollok(win,bf) (win->_scroll = bf)
+#define keypad(win,bf) (win->_keypad = bf)
+#define flushok(w,bf) (bf?(w->_flags|=_FLUSH):(w->_flags&=~_FLUSH))
+#define getyx(win,y,x) y = win->_cury, x = win->_curx
+#define winch(win) (*(*(win->_y+win->_cury)+win->_curx) & 0177)
+
+
+WINDOW *initscr (), *newwin (), *subwin ();
+char *longname ();
+
+/*
+ * Used to be in unctrl.h.
+ */
+#define   unctrl(c)   *(_unctrl+((c) & 0177))
+extern char *_unctrl[];
+
+#endif
+
+#ifdef 0
+char acs_map[] =
+{
+  '\00',			/* '\00' */
+  '\01',			/* '\01' */
+  '\02',			/* '\02' */
+  '\03',			/* '\03' */
+  '\04',			/* '\04' */
+  '\05',			/* '\05' */
+  '\06',			/* '\06' */
+  '\07',			/* '\07' */
+  '\010',			/* '\010' */
+  '\011',			/* '\011' */
+  '\012',			/* '\012' */
+  '\013',			/* '\013' */
+  '\014',			/* '\014' */
+  '\015',			/* '\015' */
+  '\016',			/* '\016' */
+  '\017',			/* '\017' */
+  '\020',			/* '\020' */
+  '\021',			/* '\021' */
+  '\022',			/* '\022' */
+  '\023',			/* '\023' */
+  '\024',			/* '\024' */
+  '\025',			/* '\025' */
+  '\026',			/* '\026' */
+  '\027',			/* '\027' */
+  '\030',			/* '\030' */
+  '\031',			/* '\031' */
+  '\032',			/* '\032' */
+  '\033',			/* '\033' */
+  '\034',			/* '\034' */
+  '\035',			/* '\035' */
+  '\036',			/* '\036' */
+  '\037',			/* '\037' */
+  '\040',			/* ' ' */
+  '\041',			/* '!' */
+  '\042',			/* '"' */
+  '\043',			/* '#' */
+  '\044',			/* '$' */
+  '\045',			/* '%' */
+  '\046',			/* '&' */
+  '\047',			/* ''' */
+  '\050',			/* '(' */
+  '\051',			/* ')' */
+  '\052',			/* '*' */
+  '\032',			/* '+' */
+  '\033',			/* ',' */
+  '\030',			/* '-' */
+  '\031',			/* '.' */
+  '\057',			/* '/' */
+  '\333',			/* '0' */
+  '\061',			/* '1' */
+  '\062',			/* '2' */
+  '\063',			/* '3' */
+  '\064',			/* '4' */
+  '\065',			/* '5' */
+  '\066',			/* '6' */
+  '\067',			/* '7' */
+  '\070',			/* '8' */
+  '\071',			/* '9' */
+  '\072',			/* ':' */
+  '\073',			/* ';' */
+  '\074',			/* '<' */
+  '\075',			/* '=' */
+  '\076',			/* '>' */
+  '\077',			/* '?' */
+  '\100',			/* '@' */
+  '\101',			/* 'A' */
+  '\102',			/* 'B' */
+  '\103',			/* 'C' */
+  '\104',			/* 'D' */
+  '\105',			/* 'E' */
+  '\106',			/* 'F' */
+  '\107',			/* 'G' */
+  '\110',			/* 'H' */
+  '\111',			/* 'I' */
+  '\112',			/* 'J' */
+  '\113',			/* 'K' */
+  '\114',			/* 'L' */
+  '\115',			/* 'M' */
+  '\116',			/* 'N' */
+  '\117',			/* 'O' */
+  '\120',			/* 'P' */
+  '\121',			/* 'Q' */
+  '\122',			/* 'R' */
+  '\123',			/* 'S' */
+  '\124',			/* 'T' */
+  '\125',			/* 'U' */
+  '\126',			/* 'V' */
+  '\127',			/* 'W' */
+  '\130',			/* 'X' */
+  '\131',			/* 'Y' */
+  '\132',			/* 'Z' */
+  '\133',			/* '[' */
+  '\134',			/* '\' */
+  '\135',			/* ']' */
+  '\136',			/* '^' */
+  '\137',			/* '_' */
+  '\004',			/* '`' */
+  '\261',			/* 'a' */
+  '\142',			/* 'b' */
+  '\143',			/* 'c' */
+  '\144',			/* 'd' */
+  '\145',			/* 'e' */
+  '\370',			/* 'f' */
+  '\361',			/* 'g' */
+  '\260',			/* 'h' */
+  '\017',			/* 'i' */
+  '\274',			/* 'j' */
+  '\273',			/* 'k' */
+  '\311',			/* 'l' */
+  '\310',			/* 'm' */
+  '\316',			/* 'n' */
+  '\157',			/* 'o' */
+  '\160',			/* 'p' */
+  '\315',			/* 'q' */
+  '\162',			/* 'r' */
+  '\163',			/* 's' */
+  '\314',			/* 't' */
+  '\271',			/* 'u' */
+  '\312',			/* 'v' */
+  '\313',			/* 'w' */
+  '\272',			/* 'x' */
+  '\171',			/* 'y' */
+  '\172',			/* 'z' */
+  '\173',			/* '{' */
+  '\174',			/* '|' */
+  '\175',			/* '}' */
+  '\007',			/* '~' */
+  '\177',			/* '\177' */
+  '\200',			/* '\200' */
+  '\201',			/* '\201' */
+  '\202',			/* '\202' */
+  '\203',			/* '\203' */
+  '\204',			/* '\204' */
+  '\205',			/* '\205' */
+  '\206',			/* '\206' */
+  '\207',			/* '\207' */
+  '\210',			/* '\210' */
+  '\211',			/* '\211' */
+  '\212',			/* '\212' */
+  '\213',			/* '\213' */
+  '\214',			/* '\214' */
+  '\215',			/* '\215' */
+  '\216',			/* '\216' */
+  '\217',			/* '\217' */
+  '\220',			/* '\220' */
+  '\221',			/* '\221' */
+  '\222',			/* '\222' */
+  '\223',			/* '\223' */
+  '\224',			/* '\224' */
+  '\225',			/* '\225' */
+  '\226',			/* '\226' */
+  '\227',			/* '\227' */
+  '\230',			/* '\230' */
+  '\231',			/* '\231' */
+  '\232',			/* '\232' */
+  '\233',			/* '\233' */
+  '\234',			/* '\234' */
+  '\235',			/* '\235' */
+  '\236',			/* '\236' */
+  '\237',			/* '\237' */
+  '\240',			/* '\240' */
+  '\241',			/* '\241' */
+  '\242',			/* '\242' */
+  '\243',			/* '\243' */
+  '\244',			/* '\244' */
+  '\245',			/* '\245' */
+  '\246',			/* '\246' */
+  '\247',			/* '\247' */
+  '\250',			/* '\250' */
+  '\251',			/* '\251' */
+  '\252',			/* '\252' */
+  '\253',			/* '\253' */
+  '\254',			/* '\254' */
+  '\255',			/* '\255' */
+  '\256',			/* '\256' */
+  '\257',			/* '\257' */
+  '\260',			/* '\260' */
+  '\261',			/* '\261' */
+  '\262',			/* '\262' */
+  '\263',			/* '\263' */
+  '\264',			/* '\264' */
+  '\265',			/* '\265' */
+  '\266',			/* '\266' */
+  '\267',			/* '\267' */
+  '\270',			/* '\270' */
+  '\271',			/* '\271' */
+  '\272',			/* '\272' */
+  '\273',			/* '\273' */
+  '\274',			/* '\274' */
+  '\275',			/* '\275' */
+  '\276',			/* '\276' */
+  '\277',			/* '\277' */
+  '\300',			/* '\300' */
+  '\301',			/* '\301' */
+  '\302',			/* '\302' */
+  '\303',			/* '\303' */
+  '\304',			/* '\304' */
+  '\305',			/* '\305' */
+  '\306',			/* '\306' */
+  '\307',			/* '\307' */
+  '\310',			/* '\310' */
+  '\311',			/* '\311' */
+  '\312',			/* '\312' */
+  '\313',			/* '\313' */
+  '\314',			/* '\314' */
+  '\315',			/* '\315' */
+  '\316',			/* '\316' */
+  '\317',			/* '\317' */
+  '\320',			/* '\320' */
+  '\321',			/* '\321' */
+  '\322',			/* '\322' */
+  '\323',			/* '\323' */
+  '\324',			/* '\324' */
+  '\325',			/* '\325' */
+  '\326',			/* '\326' */
+  '\327',			/* '\327' */
+  '\330',			/* '\330' */
+  '\331',			/* '\331' */
+  '\332',			/* '\332' */
+  '\333',			/* '\333' */
+  '\334',			/* '\334' */
+  '\335',			/* '\335' */
+  '\336',			/* '\336' */
+  '\337',			/* '\337' */
+  '\340',			/* '\340' */
+  '\341',			/* '\341' */
+  '\342',			/* '\342' */
+  '\343',			/* '\343' */
+  '\344',			/* '\344' */
+  '\345',			/* '\345' */
+  '\346',			/* '\346' */
+  '\347',			/* '\347' */
+  '\350',			/* '\350' */
+  '\351',			/* '\351' */
+  '\352',			/* '\352' */
+  '\353',			/* '\353' */
+  '\354',			/* '\354' */
+  '\355',			/* '\355' */
+  '\356',			/* '\356' */
+  '\357',			/* '\357' */
+  '\360',			/* '\360' */
+  '\361',			/* '\361' */
+  '\362',			/* '\362' */
+  '\363',			/* '\363' */
+  '\364',			/* '\364' */
+  '\365',			/* '\365' */
+  '\366',			/* '\366' */
+  '\367',			/* '\367' */
+  '\370',			/* '\370' */
+  '\371',			/* '\371' */
+  '\372',			/* '\372' */
+  '\373',			/* '\373' */
+  '\374',			/* '\374' */
+  '\375',			/* '\375' */
+  '\376',			/* '\376' */
+  '\377',			/* '\377' */
+  0
+};
+#endif
+
+/*
+ * Standard alternate character set.  The current ACS world is evolving, so
+ * we support only a widely available subset: the line drawing characters
+ * from the VT100, plus a few from the Teletype 5410v1.  Eventually there may
+ * be support of more sophisticated ACS line drawing, such as that in the
+ * Teletype 5410, the HP line drawing set, and the like.  There may be
+ * support for some non line oriented characters as well.
+ * 
+ * Line drawing ACS names are of the form ACS_trbl, where t is the top, r is the
+ * right, b is the bottom, and l is the left.  t, r, b, and l might be B
+ * (blank), S (single), D (double), or T (thick).  The subset defined here
+ * only uses B and S.
+ */
+
+#define ACS_BSSB	(acs_map['l'])
+#define ACS_SSBB	(acs_map['m'])
+#define ACS_BBSS	(acs_map['k'])
+#define ACS_SBBS	(acs_map['j'])
+#define ACS_SBSS	(acs_map['u'])
+#define ACS_SSSB	(acs_map['t'])
+#define ACS_SSBS	(acs_map['v'])
+#define ACS_BSSS	(acs_map['w'])
+#define ACS_BSBS	(acs_map['q'])
+#define ACS_SBSB	(acs_map['x'])
+#define ACS_SSSS	(acs_map['n'])
+
+/*
+ * Human readable names for the most commonly used characters. "Upper",
+ * "right", etc. are chosen to be consistent with the vt100 manual.
+ */
+
+#define ACS_ULCORNER	ACS_BSSB
+#define ACS_LLCORNER	ACS_SSBB
+#define ACS_URCORNER	ACS_BBSS
+#define ACS_LRCORNER	ACS_SBBS
+#define ACS_RTEE	ACS_SBSS
+#define ACS_LTEE	ACS_SSSB
+#define ACS_BTEE	ACS_SSBS
+#define ACS_TTEE	ACS_BSSS
+#define ACS_HLINE	ACS_BSBS
+#define ACS_VLINE	ACS_SBSB
+#define ACS_PLUS	ACS_SSSS
+#define ACS_S1		(acs_map['o'])	/* scan line 1 */
+#define ACS_S9		(acs_map['s'])	/* scan line 9 */
+#define ACS_DIAMOND	(acs_map['`'])	/* diamond */
+#define ACS_CKBOARD	(acs_map['a'])	/* checker board (stipple) */
+#define ACS_DEGREE	(acs_map['f'])	/* degree symbol */
+#define ACS_PLMINUS	(acs_map['g'])	/* plus/minus */
+#define ACS_BULLET	(acs_map['~'])	/* bullet */
+/* Teletype 5410v1 symbols */
+#define ACS_LARROW	(acs_map[','])	/* arrow pointing left */
+#define ACS_RARROW	(acs_map['+'])	/* arrow pointing right */
+#define ACS_DARROW	(acs_map['.'])	/* arrow pointing down */
+#define ACS_UARROW	(acs_map['-'])	/* arrow pointing up */
+#define ACS_BOARD	(acs_map['h'])	/* board of squares */
+#define ACS_LANTERN	(acs_map['i'])	/* lantern symbol */
+#define ACS_BLOCK	(acs_map['0'])	/* solid square block */
+
+char *malloc ();
+long time ();
